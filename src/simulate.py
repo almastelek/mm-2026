@@ -189,57 +189,65 @@ def run_one_bracket(
     Run one full bracket: resolve each game by sampling from P(team_a wins).
     Returns list of (team_name, round_reached) for each team. round_reached = 64, 32, 16, 8, 4, 2, 1.
     """
-    # winners[i] = team that won the i-th round-64 game
-    round_64_winners = []
+    # Round of 64 winners as (team, original_seed)
+    round_64_winners: list[tuple[str, int]] = []
     for team_a, team_b, seed_a, seed_b in matchups_64:
         p = predict_game_prob(
             team_a, team_b, seed_a, seed_b, year, 64,
             model_package, barttorvik, resumes, f538, seed_results, cache,
         )
         win_a = rng.random() < p
-        round_64_winners.append(team_a if win_a else team_b)
+        if win_a:
+            round_64_winners.append((team_a, seed_a))
+        else:
+            round_64_winners.append((team_b, seed_b))
 
     # Round 32: 16 games
-    round_32_winners = []
+    round_32_winners: list[tuple[str, int]] = []
     for i in range(0, 32, 2):
-        a, b = round_64_winners[i], round_64_winners[i + 1]
-        # We don't have seeds for "winner of game i" - use 0,0 and round 32
-        p = predict_game_prob(a, b, 0, 0, year, 32, model_package, barttorvik, resumes, f538, seed_results, cache)
-        # If we don't have features for a/b we get 0.5; else use model
+        (a, seed_a), (b, seed_b) = round_64_winners[i], round_64_winners[i + 1]
+        p = predict_game_prob(a, b, seed_a, seed_b, year, 32, model_package, barttorvik, resumes, f538, seed_results, cache)
         win_a = rng.random() < p
-        round_32_winners.append(a if win_a else b)
+        round_32_winners.append((a, seed_a) if win_a else (b, seed_b))
 
-    round_16_winners = []
+    # Sweet 16
+    round_16_winners: list[tuple[str, int]] = []
     for i in range(0, 16, 2):
-        a, b = round_32_winners[i], round_32_winners[i + 1]
-        p = predict_game_prob(a, b, 0, 0, year, 16, model_package, barttorvik, resumes, f538, seed_results, cache)
-        round_16_winners.append(a if rng.random() < p else b)
+        (a, seed_a), (b, seed_b) = round_32_winners[i], round_32_winners[i + 1]
+        p = predict_game_prob(a, b, seed_a, seed_b, year, 16, model_package, barttorvik, resumes, f538, seed_results, cache)
+        win_a = rng.random() < p
+        round_16_winners.append((a, seed_a) if win_a else (b, seed_b))
 
-    round_8_winners = []
+    # Elite 8
+    round_8_winners: list[tuple[str, int]] = []
     for i in range(0, 8, 2):
-        a, b = round_16_winners[i], round_16_winners[i + 1]
-        p = predict_game_prob(a, b, 0, 0, year, 8, model_package, barttorvik, resumes, f538, seed_results, cache)
-        round_8_winners.append(a if rng.random() < p else b)
+        (a, seed_a), (b, seed_b) = round_16_winners[i], round_16_winners[i + 1]
+        p = predict_game_prob(a, b, seed_a, seed_b, year, 8, model_package, barttorvik, resumes, f538, seed_results, cache)
+        win_a = rng.random() < p
+        round_8_winners.append((a, seed_a) if win_a else (b, seed_b))
 
-    round_4_winners = []
+    # Final Four
+    round_4_winners: list[tuple[str, int]] = []
     for i in range(0, 4, 2):
-        a, b = round_8_winners[i], round_8_winners[i + 1]
-        p = predict_game_prob(a, b, 0, 0, year, 4, model_package, barttorvik, resumes, f538, seed_results, cache)
-        round_4_winners.append(a if rng.random() < p else b)
+        (a, seed_a), (b, seed_b) = round_8_winners[i], round_8_winners[i + 1]
+        p = predict_game_prob(a, b, seed_a, seed_b, year, 4, model_package, barttorvik, resumes, f538, seed_results, cache)
+        win_a = rng.random() < p
+        round_4_winners.append((a, seed_a) if win_a else (b, seed_b))
 
-    # Final two
-    a, b = round_4_winners[0], round_4_winners[1]
-    p = predict_game_prob(a, b, 0, 0, year, 2, model_package, barttorvik, resumes, f538, seed_results, cache)
-    champ = a if rng.random() < p else b
+    # Final
+    (a, seed_a), (b, seed_b) = round_4_winners[0], round_4_winners[1]
+    p = predict_game_prob(a, b, seed_a, seed_b, year, 2, model_package, barttorvik, resumes, f538, seed_results, cache)
+    champ_team, champ_seed = ((a, seed_a) if rng.random() < p else (b, seed_b))
 
     # round_reached: 1=champ, 2=runner-up, 4=F4, 8=E8, 16=S16, 32=R32, 64=R64
-    r4 = set(round_4_winners)
-    r8 = set(round_8_winners)
-    r16 = set(round_16_winners)
-    r32 = set(round_32_winners)
-    results = []
-    for t in round_64_winners:
-        if t == champ:
+    r4 = {t for t, _ in round_4_winners}
+    r8 = {t for t, _ in round_8_winners}
+    r16 = {t for t, _ in round_16_winners}
+    r32 = {t for t, _ in round_32_winners}
+    results: list[tuple[str, int]] = []
+    # teams that advanced at least once
+    for t, _ in round_64_winners:
+        if t == champ_team:
             results.append((t, 1))
         elif t in r4:
             results.append((t, 2))
@@ -253,7 +261,7 @@ def run_one_bracket(
             results.append((t, 32))
     # R64 losers: for each game, the team that didn't win
     for i, (team_a, team_b, _, _) in enumerate(matchups_64):
-        winner = round_64_winners[i]
+        winner, _ = round_64_winners[i]
         loser = team_b if winner == team_a else team_a
         results.append((loser, 64))
     return results
