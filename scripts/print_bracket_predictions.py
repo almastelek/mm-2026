@@ -17,7 +17,7 @@ from src.train import scale_features
 
 
 YEAR = 2026
-STRATEGY = "xgb"  # "logistic" | "logistic_raw" | "xgb" | "avg"
+STRATEGY = "nn"  # "logistic" | "logistic_raw" | "xgb" | "avg"
 
 
 def build_model_package(strategy: str):

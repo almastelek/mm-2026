@@ -156,14 +156,43 @@ def _predict_game_prob_impl(
             X_xgb = X_xgb[xgb_feats].astype(float).fillna(0)
             p_xgb = float(use_xgb["model"].predict_proba(X_xgb)[0, 1])
 
-    # Combine logistic and XGBoost based on chosen strategy
+    # Optional MLP prediction using core feature set
+    p_mlp = None
+    mlp_all = model_package.get("_mlp_core_all")
+    mlp_high = model_package.get("_mlp_core_high")
+    if mlp_all is not None:
+        active_stakes = model_package.get("_active_stakes", "all")
+        use_mlp = mlp_high if (active_stakes == "high" and mlp_high is not None) else mlp_all
+        if use_mlp is not None:
+            mlp_feats = use_mlp["feature_names"]
+            X_mlp = pd.DataFrame([row])
+            for c in mlp_feats:
+                if c not in X_mlp.columns:
+                    X_mlp[c] = 0
+            X_mlp = X_mlp[mlp_feats].astype(float).fillna(0)
+            X_mlp = scale_features(X_mlp)
+            p_mlp = float(use_mlp["model"].predict_proba(X_mlp)[0, 1])
+
+    # Combine logistic, XGBoost, and MLP based on chosen strategy
     strategy = model_package.get("_strategy", "avg")
-    if strategy in ("logistic", "logistic_raw") or p_xgb is None:
+    if strategy in ("logistic", "logistic_raw") or (p_xgb is None and p_mlp is None):
         p = p_log
     elif strategy == "xgb":
-        p = p_xgb
-    else:  # "avg" (default)
-        p = 0.5 * p_log + 0.5 * p_xgb
+        p = p_xgb if p_xgb is not None else p_log
+    elif strategy == "nn":
+        p = p_mlp if p_mlp is not None else p_log
+    elif strategy == "avg_nn_xgb":
+        # Average XGB and MLP (fallbacks to available ones).
+        vals = [v for v in [p_xgb, p_mlp] if v is not None]
+        if vals:
+            p = float(sum(vals) / len(vals))
+        else:
+            p = p_log
+    else:  # "avg" (default): average logistic and XGB when both exist
+        if p_xgb is not None:
+            p = 0.5 * p_log + 0.5 * p_xgb
+        else:
+            p = p_log
 
     # --- R64 gate using true historical upset rates ---
     # For large seed gaps in the round of 64, blend the model probability with the
@@ -378,6 +407,10 @@ def run_simulation(
     xgb_core_all = _load_optional(MODELS_DIR / "game_xgb_core_all.joblib")
     xgb_core_high = _load_optional(MODELS_DIR / "game_xgb_core_high.joblib")
 
+    # MLP models (core only)
+    mlp_core_all = _load_optional(MODELS_DIR / "game_mlp_core_all.joblib")
+    mlp_core_high = _load_optional(MODELS_DIR / "game_mlp_core_high.joblib")
+
     # Backward compatibility fallbacks
     if core_all is None and (MODELS_DIR / "game_classifier_core.joblib").exists():
         core_all = joblib.load(MODELS_DIR / "game_classifier_core.joblib")
@@ -427,6 +460,8 @@ def run_simulation(
                 "_pick_model": pick_model,
                 "_xgb_core_all": xgb_core_all,
                 "_xgb_core_high": xgb_core_high,
+                "_mlp_core_all": mlp_core_all,
+                "_mlp_core_high": mlp_core_high,
                 "_strategy": strategy,
             },
             barttorvik,
