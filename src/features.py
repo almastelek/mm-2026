@@ -18,6 +18,33 @@ def load_barttorvik_neutral(path: Path | None = None) -> pd.DataFrame:
     return df
 
 
+def load_kenpom_barttorvik(path: Path | None = None) -> pd.DataFrame:
+    """
+    Load KenPom-style metrics from KenPom Barttorvik.csv.
+
+    This file already includes many of the Barttorvik columns, but we only
+    use the KenPom-adjusted tempo/efficiency fields to avoid duplication:
+      - KADJ O, KADJ D, KADJ EM (overall, offense, defense)
+      - K TEMPO, KADJ T (tempo)
+    """
+    path = path or (DATA_DIR / "KenPom Barttorvik.csv")
+    df = pd.read_csv(path)
+    df["team_year_key"] = df.apply(
+        lambda r: team_year_key(str(r["TEAM"]), int(r["YEAR"])), axis=1
+    )
+    # Keep only the KenPom-specific columns plus join key to avoid confusion
+    keep_cols = [
+        "team_year_key",
+        "KADJ O",
+        "KADJ D",
+        "KADJ EM",
+        "K TEMPO",
+        "KADJ T",
+    ]
+    existing = [c for c in keep_cols if c in df.columns]
+    return df[existing]
+
+
 def load_resumes(path: Path | None = None) -> pd.DataFrame:
     path = path or (DATA_DIR / "Resumes.csv")
     df = pd.read_csv(path)
@@ -58,6 +85,7 @@ def build_game_features(
     barttorvik: pd.DataFrame | None = None,
     resumes: pd.DataFrame | None = None,
     f538: pd.DataFrame | None = None,
+    kenpom: pd.DataFrame | None = None,
     seed_results: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
@@ -83,6 +111,12 @@ def build_game_features(
         f538 = load_538()
     f538 = f538[f538_cols].drop_duplicates(subset=["team_year_key"], keep="first")
 
+    if kenpom is None:
+        kenpom = load_kenpom_barttorvik()
+    # KenPom subset already has team_year_key + KADJ O/D/EM, K TEMPO, KADJ T
+    kp = kenpom.drop_duplicates(subset=["team_year_key"], keep="first")
+
+    # Barttorvik base
     g = g.merge(bt, left_on="team_a_key", right_on="team_year_key", how="left", suffixes=("", "_a"))
     g = g.rename(columns={"BARTHAG": "barthag_a", "BADJ EM": "badj_em_a", "WAB": "wab_a"})
     g = g.drop(columns=[c for c in g.columns if c == "team_year_key"])
@@ -91,6 +125,7 @@ def build_game_features(
     g = g.rename(columns={"BARTHAG": "barthag_b", "BADJ EM": "badj_em_b", "WAB": "wab_b"})
     g = g.drop(columns=[c for c in g.columns if c == "team_year_key"], errors="ignore")
 
+    # Resumes
     g = g.merge(res, left_on="team_a_key", right_on="team_year_key", how="left")
     g = g.rename(columns={"ELO": "elo_a", "R SCORE": "r_score_a", "RESUME": "resume_a"})
     g = g.drop(columns=[c for c in g.columns if c == "team_year_key"], errors="ignore")
@@ -99,12 +134,38 @@ def build_game_features(
     g = g.rename(columns={"ELO": "elo_b", "R SCORE": "r_score_b", "RESUME": "resume_b"})
     g = g.drop(columns=[c for c in g.columns if c == "team_year_key"], errors="ignore")
 
+    # 538 ratings
     g = g.merge(f538, left_on="team_a_key", right_on="team_year_key", how="left")
     g = g.rename(columns={"POWER RATING": "power_rating_a"})
     g = g.drop(columns=[c for c in g.columns if c == "team_year_key"], errors="ignore")
 
     g = g.merge(f538, left_on="team_b_key", right_on="team_year_key", how="left")
     g = g.rename(columns={"POWER RATING": "power_rating_b"})
+    g = g.drop(columns=[c for c in g.columns if c == "team_year_key"], errors="ignore")
+
+    # KenPom metrics
+    g = g.merge(kp, left_on="team_a_key", right_on="team_year_key", how="left")
+    g = g.rename(
+        columns={
+            "KADJ O": "k_adj_o_a",
+            "KADJ D": "k_adj_d_a",
+            "KADJ EM": "k_adj_em_a",
+            "K TEMPO": "k_tempo_a",
+            "KADJ T": "k_adj_t_a",
+        }
+    )
+    g = g.drop(columns=[c for c in g.columns if c == "team_year_key"], errors="ignore")
+
+    g = g.merge(kp, left_on="team_b_key", right_on="team_year_key", how="left")
+    g = g.rename(
+        columns={
+            "KADJ O": "k_adj_o_b",
+            "KADJ D": "k_adj_d_b",
+            "KADJ EM": "k_adj_em_b",
+            "K TEMPO": "k_tempo_b",
+            "KADJ T": "k_adj_t_b",
+        }
+    )
     g = g.drop(columns=[c for c in g.columns if c == "team_year_key"], errors="ignore")
 
     # Seed context: historical win% by seed (from Seed Results)
@@ -128,6 +189,18 @@ def build_game_features(
     g["r_score_diff"] = g["r_score_a"] - g["r_score_b"]
     g["power_rating_diff"] = g["power_rating_a"] - g["power_rating_b"]
 
+    # KenPom diffs
+    if "k_adj_em_a" in g.columns and "k_adj_em_b" in g.columns:
+        g["k_adj_em_diff"] = g["k_adj_em_a"] - g["k_adj_em_b"]
+    if "k_adj_o_a" in g.columns and "k_adj_o_b" in g.columns:
+        g["k_adj_o_diff"] = g["k_adj_o_a"] - g["k_adj_o_b"]
+    if "k_adj_d_a" in g.columns and "k_adj_d_b" in g.columns:
+        g["k_adj_d_diff"] = g["k_adj_d_a"] - g["k_adj_d_b"]
+    if "k_tempo_a" in g.columns and "k_tempo_b" in g.columns:
+        g["k_tempo_diff"] = g["k_tempo_a"] - g["k_tempo_b"]
+    if "k_adj_t_a" in g.columns and "k_adj_t_b" in g.columns:
+        g["k_adj_t_diff"] = g["k_adj_t_a"] - g["k_adj_t_b"]
+
     # Round as categorical / numeric
     g["round_num"] = g["round"]
 
@@ -145,6 +218,11 @@ def get_feature_columns() -> list[str]:
         "elo_diff",
         "r_score_diff",
         "power_rating_diff",
+        "k_adj_em_diff",
+        "k_adj_o_diff",
+        "k_adj_d_diff",
+        "k_tempo_diff",
+        "k_adj_t_diff",
         "round_num",
     ]
 

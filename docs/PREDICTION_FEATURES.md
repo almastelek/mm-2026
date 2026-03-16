@@ -16,11 +16,13 @@ This document lists the data and features needed to run game-level predictions a
 
 These must be available for the **same season** as the tournament (e.g. 2025–26 for 2026 March Madness). Join key: **normalized team name** and **year** (see `src.team_utils.team_year_key`).
 
-| Data source | File (current project) | Columns used for features |
-|-------------|-------------------------|----------------------------|
+
+| Data source              | File (current project)   | Columns used for features   |
+| ------------------------ | ------------------------ | --------------------------- |
 | **Barttorvik** (neutral) | `Barttorvik Neutral.csv` | `BARTHAG`, `BADJ EM`, `WAB` |
-| **Resumes** | `Resumes.csv` | `ELO`, `R SCORE`, `RESUME` |
-| **538** (optional) | `538 Ratings.csv` | `POWER RATING` |
+| **Resumes**              | `Resumes.csv`            | `ELO`, `R SCORE`, `RESUME`  |
+| **538** (optional)       | `538 Ratings.csv`        | `POWER RATING`              |
+
 
 - **Required for core model:** Barttorvik (`BARTHAG`, `BADJ EM`) and Resumes (`ELO`, `R SCORE`). If a team is missing from either, that game may be dropped or filled with 0 (depending on pipeline settings).
 - **Optional:** 538 `POWER RATING`; if missing, the pipeline fills the difference with 0.
@@ -54,3 +56,4 @@ For a **new season**, ensure the team-season files above are updated for that se
 2. Add the bracket (round-of-64 matchups) in Tournament Simulation format for that **YEAR**.
 3. Run `src.simulate.run_simulation(year=YEAR, n_sims=...)` (and optionally re-train `src.train.train_model` / `src.ensemble.train_baseline_and_ensemble` on updated historical data).
 4. Use `output/win_probs_<year>.csv` for win probabilities by round.
+

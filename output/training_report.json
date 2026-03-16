@@ -1,0 +1,41 @@
+{
+  "accuracy_holdout": 0.7631578947368421,
+  "log_loss_holdout": 0.532501264503946,
+  "brier_score_holdout": 0.17454146073603774,
+  "cv_accuracy_mean": 0.7015647226173541,
+  "cv_accuracy_std": 0.10678383342042043,
+  "cv_log_loss_mean": 0.5847336101543402,
+  "cv_log_loss_std": 0.15542383404786544,
+  "n_train": 149,
+  "n_test": 38,
+  "features": [
+    "seed_diff",
+    "seed_win_pct_a",
+    "seed_win_pct_b",
+    "barthag_diff",
+    "badj_em_diff",
+    "elo_diff",
+    "r_score_diff",
+    "power_rating_diff",
+    "k_adj_em_diff",
+    "k_adj_o_diff",
+    "k_adj_d_diff",
+    "k_tempo_diff",
+    "k_adj_t_diff",
+    "round_num"
+  ],
+  "calibration_bins_true": [
+    0.0,
+    0.5,
+    0.5833333333333334,
+    1.0,
+    0.8461538461538461
+  ],
+  "calibration_bins_pred": [
+    0.1328221353969551,
+    0.3469820422157874,
+    0.516275431483032,
+    0.683591378666076,
+    0.9252601851456264
+  ]
+}
