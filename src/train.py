@@ -20,12 +20,20 @@ from .features import (
 )
 
 
-def prepare_xy(df: pd.DataFrame, feature_names: list[str]):
-    use = [c for c in feature_names if c in df.columns]
-    X = df[use].astype(float).fillna(0)
-    # Emphasize schedule-strength style signals a bit more.
+def scale_features(X: pd.DataFrame) -> pd.DataFrame:
+    """
+    Apply the same feature scaling used at training time.
+    This must also be used at prediction time wherever we feed features into the logistic model.
+    """
+    X = X.copy()
+    # Emphasize team-strength and schedule-strength signals more than raw seed.
     # (Scaling doesn't change ordering, but it makes these features matter more for linear models.)
     scale = {
+        "barthag_diff": 1.5,
+        "badj_em_diff": 1.3,
+        "elo_diff": 1.3,
+        "power_rating_diff": 1.2,
+        "k_adj_em_diff": 1.3,
         "elite_sos_diff": 1.8,
         "sor_diff": 1.4,
         "kpi_diff": 1.2,
@@ -34,6 +42,13 @@ def prepare_xy(df: pd.DataFrame, feature_names: list[str]):
     for col, mult in scale.items():
         if col in X.columns:
             X[col] = X[col] * float(mult)
+    return X
+
+
+def prepare_xy(df: pd.DataFrame, feature_names: list[str]):
+    use = [c for c in feature_names if c in df.columns]
+    X = df[use].astype(float).fillna(0)
+    X = scale_features(X)
     y = df["winner"].astype(int)
     return X, y, use
 
@@ -77,10 +92,23 @@ def train_model(
     w_year = np.exp(-lambda_year * (year_max - years))
     round_weights = {64: 1.0, 32: 1.1, 16: 1.3, 8: 1.5, 4: 1.7, 2: 2.0}
     w_round = rounds.map(round_weights).fillna(1.0)
-    sample_weight = (w_year * w_round).astype(float).values
+    sample_weight = (w_year * w_round).astype(float)
+
+    # Symmetrize training data w.r.t. team ordering:
+    # for each game, add a mirrored example with all *_diff features negated and label flipped.
+    diff_cols = [c for c in X.columns if c.endswith("_diff") and c != "abs_seed_diff"]
+    if diff_cols:
+        X_flip = X.copy()
+        X_flip[diff_cols] = -X_flip[diff_cols]
+        y_flip = 1 - y
+        w_flip = sample_weight.copy()
+
+        X = pd.concat([X, X_flip], ignore_index=True)
+        y = pd.concat([y, y_flip], ignore_index=True)
+        sample_weight = pd.concat([sample_weight, w_flip], ignore_index=True)
 
     X_train, X_test, y_train, y_test, w_train, w_test = train_test_split(
-        X, y, sample_weight, test_size=test_size, random_state=random_state, stratify=y
+        X, y, sample_weight.values, test_size=test_size, random_state=random_state, stratify=y
     )
 
     model = LogisticRegression(max_iter=1000, random_state=random_state, C=0.5)

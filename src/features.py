@@ -364,13 +364,6 @@ def get_feature_columns() -> list[str]:
     return [
         "seed_diff",
         "abs_seed_diff",
-        "is_1_16",
-        "is_2_15",
-        "is_3_14",
-        "is_4_13",
-        "is_5_12",
-        "seed_win_pct_a",
-        "seed_win_pct_b",
         "barthag_diff",
         "badj_em_diff",
         "elo_diff",
@@ -387,7 +380,6 @@ def get_feature_columns() -> list[str]:
         "k_tempo_diff",
         "k_adj_t_diff",
         "elite_sos_diff",
-        "historical_upset_prob",
         "round_num",
     ]
 

@@ -20,6 +20,7 @@ from .features import (
     get_core_feature_columns,
     get_enhanced_feature_columns,
 )
+from .train import scale_features
 from .team_utils import team_year_key
 
 
@@ -134,6 +135,7 @@ def _predict_game_prob_impl(
         if c not in X.columns:
             X[c] = 0
     X = X[feats].astype(float).fillna(0)
+    X = scale_features(X)
 
     # Logistic prediction
     p_log = float(model_package["model"].predict_proba(X)[0, 1])
@@ -156,7 +158,7 @@ def _predict_game_prob_impl(
 
     # Combine logistic and XGBoost based on chosen strategy
     strategy = model_package.get("_strategy", "avg")
-    if strategy == "logistic" or p_xgb is None:
+    if strategy in ("logistic", "logistic_raw") or p_xgb is None:
         p = p_log
     elif strategy == "xgb":
         p = p_xgb
@@ -166,7 +168,8 @@ def _predict_game_prob_impl(
     # --- R64 gate using true historical upset rates ---
     # For large seed gaps in the round of 64, blend the model probability with the
     # empirical seed-gap upset rate computed from all historical games.
-    if int(round_num) == 64 and seed_a and seed_b:
+    # Disabled for strategy="logistic_raw" so we can inspect pure model behavior.
+    if strategy != "logistic_raw" and int(round_num) == 64 and seed_a and seed_b:
         fav_seed = int(min(seed_a, seed_b))
         dog_seed = int(max(seed_a, seed_b))
         seed_gap = dog_seed - fav_seed
