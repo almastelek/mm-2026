@@ -1,14 +1,14 @@
 {
-  "rating_baseline_k": 4.308714041458731,
-  "rating_baseline_b": 0.3234121625741449,
-  "ensemble_weight_rating": 0.0,
-  "rating_accuracy": 0.7105263157894737,
-  "rating_log_loss": 0.6172099429124791,
-  "rating_brier": 0.2019614809304856,
-  "classifier_accuracy": 0.7631578947368421,
-  "classifier_log_loss": 0.532501264503946,
-  "classifier_brier": 0.17454146073603774,
-  "ensemble_accuracy": 0.7631578947368421,
-  "ensemble_log_loss": 0.532501264503946,
-  "ensemble_brier": 0.17454146073603774
+  "rating_baseline_k": 5.1766154373209,
+  "rating_baseline_b": 0.22121967325921207,
+  "ensemble_weight_rating": 0.25,
+  "rating_accuracy": 0.6538461538461539,
+  "rating_log_loss": 0.6339344138024188,
+  "rating_brier": 0.22136837995561548,
+  "classifier_accuracy": 0.7163461538461539,
+  "classifier_log_loss": 0.5954213926643702,
+  "classifier_brier": 0.20392747364834404,
+  "ensemble_accuracy": 0.7019230769230769,
+  "ensemble_log_loss": 0.5940593074681446,
+  "ensemble_brier": 0.20427172197951884
 }

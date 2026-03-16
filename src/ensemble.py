@@ -12,8 +12,8 @@ from scipy.optimize import minimize
 import joblib
 
 from .config import MODELS_DIR, OUTPUT_DIR
-from .features import build_merged_dataset, get_feature_columns
-from .train import prepare_xy, train_model
+from .features import build_merged_dataset, get_core_feature_columns
+from .train import prepare_xy
 
 
 def sigmoid(x: np.ndarray) -> np.ndarray:
@@ -47,14 +47,26 @@ def train_baseline_and_ensemble(
     w_grid: list[float] | None = None,
 ) -> dict:
     if df is None:
-        df = build_merged_dataset(years=[2023, 2024, 2025])
+        df = build_merged_dataset(years=None)
     if w_grid is None:
         w_grid = [0.0, 0.25, 0.5, 0.75, 1.0]
 
-    X, y, _ = prepare_xy(df)
+    # Ensemble stays on CORE features for now (Teamsheet isn't consistently available historically)
+    core_features = get_core_feature_columns()
+    X, y, _ = prepare_xy(df, core_features)
     X = X.reset_index(drop=True)
     y = y.reset_index(drop=True)
     barthag = np.asarray(X["barthag_diff"], dtype=float) if "barthag_diff" in X.columns else np.zeros(len(X))
+
+    # Sample weights: time decay + late-round emphasis (match train.py)
+    years = df["year"].astype(int).reset_index(drop=True)
+    rounds = df["round"].astype(int).reset_index(drop=True)
+    year_max = int(years.max())
+    lambda_year = 0.08
+    w_year = np.exp(-lambda_year * (year_max - years))
+    round_weights = {64: 1.0, 32: 1.1, 16: 1.3, 8: 1.5, 4: 1.7, 2: 2.0}
+    w_round = rounds.map(round_weights).fillna(1.0)
+    sample_weight = (w_year * w_round).astype(float).values
 
     train_idx, test_idx = train_test_split(
         np.arange(len(X)), test_size=test_size, random_state=random_state, stratify=y
@@ -65,6 +77,8 @@ def train_baseline_and_ensemble(
     y_test = y.iloc[test_idx]
     barthag_train = barthag[train_idx]
     barthag_test = barthag[test_idx]
+    w_train = sample_weight[train_idx]
+    w_test = sample_weight[test_idx]
 
     # 1) Fit rating baseline on train
     k, b = fit_rating_baseline(barthag_train, y_train.values)
@@ -73,7 +87,7 @@ def train_baseline_and_ensemble(
     # 2) Train classifier (same as train.py)
     from sklearn.linear_model import LogisticRegression
     classifier = LogisticRegression(max_iter=1000, random_state=random_state, C=0.5)
-    classifier.fit(X_train, y_train)
+    classifier.fit(X_train, y_train, sample_weight=w_train)
     p_clf_test = classifier.predict_proba(X_test)[:, 1]
 
     # 3) Tune w on test (in practice you'd use a separate val set)

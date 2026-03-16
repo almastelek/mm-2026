@@ -10,11 +10,15 @@ import joblib
 from .config import DATA_DIR, MODELS_DIR, OUTPUT_DIR
 from .features import (
     load_barttorvik_neutral,
+    load_kenpom_barttorvik,
     load_resumes,
+    load_teamsheet_ranks,
     load_538,
     load_seed_results,
-    get_feature_columns,
     build_game_features,
+    load_true_upset_rates_from_games,
+    get_core_feature_columns,
+    get_enhanced_feature_columns,
 )
 from .team_utils import team_year_key
 
@@ -52,54 +56,40 @@ def build_feature_row(
     barttorvik: pd.DataFrame,
     resumes: pd.DataFrame,
     f538: pd.DataFrame,
+    kenpom: pd.DataFrame,
+    teamsheet: pd.DataFrame,
+    upset_rates: dict[tuple[int, int], float],
     seed_results: pd.DataFrame,
-) -> pd.Series | None:
-    """Build one game row for prediction: team keys and joined features, then diffs."""
-    key_a = team_year_key(team_a, year)
-    key_b = team_year_key(team_b, year)
-
-    bt = barttorvik.set_index("team_year_key")
-    res = resumes.set_index("team_year_key")
-    f5 = f538.set_index("team_year_key")
-
-    row = {"year": year, "round": round_num, "team_a": team_a, "team_b": team_b, "seed_a": seed_a, "seed_b": seed_b}
-    for name, key, df, cols in [
-        ("a", key_a, bt, ["BARTHAG", "BADJ EM", "WAB"]),
-        ("b", key_b, bt, ["BARTHAG", "BADJ EM", "WAB"]),
-    ]:
-        if key in df.index:
-            for c in cols:
-                row[c + "_" + name] = df.loc[key, c]
-        else:
-            for c in cols:
-                row[c + "_" + name] = np.nan
-    for name, key, df, cols in [
-        ("a", key_a, res, ["ELO", "R SCORE", "RESUME"]),
-        ("b", key_b, res, ["ELO", "R SCORE", "RESUME"]),
-    ]:
-        if key in df.index:
-            for c in cols:
-                row[c.lower().replace(" ", "_") + "_" + name] = df.loc[key, c]
-        else:
-            for c in cols:
-                row[c.lower().replace(" ", "_") + "_" + name] = np.nan
-    for name, key, df in [("a", key_a, f5), ("b", key_b, f5)]:
-        if key in df.index:
-            row["power_rating_" + name] = df.loc[key, "POWER RATING"]
-        else:
-            row["power_rating_" + name] = np.nan
-
-    seed_lookup = seed_results.set_index("SEED")["seed_win_pct"].to_dict()
-    row["seed_win_pct_a"] = seed_lookup.get(seed_a, np.nan)
-    row["seed_win_pct_b"] = seed_lookup.get(seed_b, np.nan)
-    row["seed_diff"] = seed_b - seed_a
-    row["barthag_diff"] = row.get("BARTHAG_a", np.nan) - row.get("BARTHAG_b", np.nan)
-    row["badj_em_diff"] = row.get("BADJ EM_a", np.nan) - row.get("BADJ EM_b", np.nan)
-    row["elo_diff"] = row.get("elo_a", np.nan) - row.get("elo_b", np.nan)
-    row["r_score_diff"] = row.get("r_score_a", np.nan) - row.get("r_score_b", np.nan)
-    row["power_rating_diff"] = row.get("power_rating_a", np.nan) - row.get("power_rating_b", np.nan)
-    row["round_num"] = round_num
-    return pd.Series(row)
+) -> pd.Series:
+    """
+    Build one game row for prediction using the *same feature builder as training*.
+    """
+    game = pd.DataFrame(
+        [
+            {
+                "year": year,
+                "round": round_num,
+                "team_a": team_a,
+                "team_b": team_b,
+                "seed_a": seed_a,
+                "seed_b": seed_b,
+                "score_a": np.nan,
+                "score_b": np.nan,
+                "winner": np.nan,
+            }
+        ]
+    )
+    feats = build_game_features(
+        game,
+        barttorvik=barttorvik,
+        resumes=resumes,
+        f538=f538,
+        kenpom=kenpom,
+        teamsheet=teamsheet,
+        upset_rates=upset_rates,
+        seed_results=seed_results,
+    )
+    return feats.iloc[0]
 
 
 def _predict_game_prob_impl(
@@ -116,26 +106,95 @@ def _predict_game_prob_impl(
     seed_results: pd.DataFrame,
 ) -> float:
     """Return P(team_a wins)."""
+    # Optional per-game model selection (core vs enhanced, high-stakes vs all)
+    picker = model_package.get("_pick_model")
+    if picker is not None:
+        probe_row = build_feature_row(
+            team_a, team_b, seed_a, seed_b, year, round_num,
+            barttorvik, resumes, f538, model_package["_kenpom"], model_package["_teamsheet"],
+            model_package["_upset_rates"], seed_results,
+        )
+        chosen = picker(probe_row)
+        # Merge chosen model/feature_names into package for scoring
+        model_package = {
+            **model_package,
+            "model": chosen["model"],
+            "feature_names": chosen["feature_names"],
+            "_active_stakes": chosen.get("_stakes", "all"),
+        }
     row = build_feature_row(
         team_a, team_b, seed_a, seed_b, year, round_num,
-        barttorvik, resumes, f538, seed_results,
+        barttorvik, resumes, f538, model_package["_kenpom"], model_package["_teamsheet"],
+        model_package["_upset_rates"], seed_results,
     )
-    if row is None:
-        return 0.5
-    feats = get_feature_columns()
+    feats = model_package["feature_names"]
     X = pd.DataFrame([row])
-    use = [c for c in feats if c in X.columns]
-    X = X[use].astype(float).fillna(0)
-    if use != model_package["feature_names"]:
-        # fill missing with 0
-        for c in model_package["feature_names"]:
-            if c not in X.columns:
-                X[c] = 0
-        X = X[model_package["feature_names"]]
-    p = model_package["model"].predict_proba(X)[0, 1]
+    # ensure all model features exist
+    for c in feats:
+        if c not in X.columns:
+            X[c] = 0
+    X = X[feats].astype(float).fillna(0)
+
+    # Logistic prediction
+    p_log = float(model_package["model"].predict_proba(X)[0, 1])
+
+    # Optional XGBoost prediction using core feature set
+    p_xgb = None
+    xgb_all = model_package.get("_xgb_core_all")
+    xgb_high = model_package.get("_xgb_core_high")
+    if xgb_all is not None:
+        active_stakes = model_package.get("_active_stakes", "all")
+        use_xgb = xgb_high if (active_stakes == "high" and xgb_high is not None) else xgb_all
+        if use_xgb is not None:
+            xgb_feats = use_xgb["feature_names"]
+            X_xgb = pd.DataFrame([row])
+            for c in xgb_feats:
+                if c not in X_xgb.columns:
+                    X_xgb[c] = 0
+            X_xgb = X_xgb[xgb_feats].astype(float).fillna(0)
+            p_xgb = float(use_xgb["model"].predict_proba(X_xgb)[0, 1])
+
+    # Combine logistic and XGBoost based on chosen strategy
+    strategy = model_package.get("_strategy", "avg")
+    if strategy == "logistic" or p_xgb is None:
+        p = p_log
+    elif strategy == "xgb":
+        p = p_xgb
+    else:  # "avg" (default)
+        p = 0.5 * p_log + 0.5 * p_xgb
+
+    # --- R64 gate using true historical upset rates ---
+    # For large seed gaps in the round of 64, blend the model probability with the
+    # empirical seed-gap upset rate computed from all historical games.
+    if int(round_num) == 64 and seed_a and seed_b:
+        fav_seed = int(min(seed_a, seed_b))
+        dog_seed = int(max(seed_a, seed_b))
+        seed_gap = dog_seed - fav_seed
+        if seed_gap > 0:
+            upset_rate = float(model_package["_upset_rates"].get((64, seed_gap), 0.0))
+            # Convert to seed-only P(team_a wins)
+            p_seed_only = upset_rate if int(seed_a) == dog_seed else (1.0 - upset_rate)
+
+            # Blend weight alpha: stronger gate for more lopsided matchups
+            if seed_gap >= 13:      # 1-14, 2-15, 1-16
+                alpha = 0.80
+            elif seed_gap >= 11:    # 3-14, 4-15, 5-16
+                alpha = 0.60
+            elif seed_gap >= 9:     # 5-14, 6-15, 7-16
+                alpha = 0.40
+            else:
+                alpha = 0.0
+
+            if alpha > 0:
+                p = alpha * p_seed_only + (1.0 - alpha) * p
     # Optional: blend with rating baseline if ensemble
-    if "rating_k" in model_package and "ensemble_w" in model_package:
+    if (
+        model_package.get("rating_k") is not None
+        and model_package.get("rating_b") is not None
+        and model_package.get("ensemble_w") is not None
+    ):
         from .ensemble import predict_rating_baseline
+
         p_rating = predict_rating_baseline(
             np.array([row["barthag_diff"]]),
             model_package["rating_k"],
@@ -160,8 +219,14 @@ def predict_game_prob(
     seed_results: pd.DataFrame,
     cache: dict | None = None,
 ) -> float:
-    """Return P(team_a wins), with optional cache keyed by (min(team_a,team_b), max(team_a,team_b), round_num)."""
-    key = (min(team_a, team_b), max(team_a, team_b), round_num)
+    """
+    Return P(team_a wins), with optional cache.
+
+    Cache key includes teams + round + seeds because the R64 gate depends on seed gap.
+    """
+    t_lo, t_hi = (team_a, team_b) if team_a <= team_b else (team_b, team_a)
+    s_lo, s_hi = (seed_a, seed_b) if seed_a <= seed_b else (seed_b, seed_a)
+    key = (t_lo, t_hi, round_num, int(s_lo), int(s_hi))
     if cache is not None and key in cache:
         p = cache[key]
         return p if team_a == key[0] else 1.0 - p
@@ -272,28 +337,68 @@ def run_simulation(
     n_sims: int = 10000,
     seed: int = 42,
     model_path: Path | None = None,
+    strategy: str = "avg",  # "logistic" | "xgb" | "avg"
 ) -> pd.DataFrame:
     """
     Run n_sims bracket simulations for given year; return DataFrame with columns
     team, R64, R32, S16, E8, F4, FINALS (win probabilities as fraction).
     """
+    strategy = strategy.lower().strip()
+    if strategy not in {"logistic", "xgb", "avg"}:
+        raise ValueError("strategy must be one of 'logistic', 'xgb', or 'avg'")
+
     rng = np.random.default_rng(seed)
     matchups_64 = load_bracket_first_round(year)
     barttorvik = load_barttorvik_neutral()
     resumes = load_resumes()
     f538 = load_538()
+    kenpom = load_kenpom_barttorvik()
+    teamsheet = load_teamsheet_ranks()
+    upset_rates = load_true_upset_rates_from_games()
     seed_results = load_seed_results()
     if "seed_win_pct" not in seed_results.columns:
         seed_results["seed_win_pct"] = pd.to_numeric(
             seed_results["WIN%"].astype(str).str.replace("%", ""), errors="coerce"
         ).where(lambda x: x <= 1, lambda x: x / 100)
 
-    model_path = model_path or (MODELS_DIR / "ensemble.joblib")
-    if not model_path.exists():
-        model_path = MODELS_DIR / "game_classifier.joblib"
-    model_package = joblib.load(model_path)
-    if not isinstance(model_package, dict):
-        model_package = {"model": model_package, "feature_names": get_feature_columns()}
+    # Load four models: core/enhanced x all/high-stakes (S16+).
+    def _load_optional(p: Path):
+        return joblib.load(p) if p.exists() else None
+
+    # Logistic models
+    core_all = _load_optional(MODELS_DIR / "game_classifier_core_all.joblib")
+    core_high = _load_optional(MODELS_DIR / "game_classifier_core_high.joblib")
+    enh_all = _load_optional(MODELS_DIR / "game_classifier_enhanced_all.joblib")
+    enh_high = _load_optional(MODELS_DIR / "game_classifier_enhanced_high.joblib")
+
+    # XGBoost models (core only)
+    xgb_core_all = _load_optional(MODELS_DIR / "game_xgb_core_all.joblib")
+    xgb_core_high = _load_optional(MODELS_DIR / "game_xgb_core_high.joblib")
+
+    # Backward compatibility fallbacks
+    if core_all is None and (MODELS_DIR / "game_classifier_core.joblib").exists():
+        core_all = joblib.load(MODELS_DIR / "game_classifier_core.joblib")
+    if core_all is None and (MODELS_DIR / "game_classifier.joblib").exists():
+        core_all = joblib.load(MODELS_DIR / "game_classifier.joblib")
+
+    if core_all is None:
+        raise FileNotFoundError("Missing core model. Run `python -m src.train` first.")
+
+    # Attach shared data caches into model packages (not saved)
+    for pkg in [core_all, core_high, enh_all, enh_high]:
+        if pkg is None:
+            continue
+        pkg["_kenpom"] = kenpom
+        pkg["_teamsheet"] = teamsheet
+        pkg["_upset_rates"] = upset_rates
+
+    def pick_model(row: pd.Series) -> dict:
+        is_high = int(row.get("round", 64)) <= 16
+        has_ts = pd.notna(row.get("net_diff")) and pd.notna(row.get("sor_diff"))
+
+        if has_ts and enh_all is not None:
+            return enh_high if (is_high and enh_high is not None) else enh_all
+        return core_high if (is_high and core_high is not None) else core_all
 
     # Get all teams from bracket
     teams = set()
@@ -304,8 +409,29 @@ def run_simulation(
     counts = {t: {r: 0 for r in [64, 32, 16, 8, 4, 2, 1]} for t in teams}
     cache = {}
     for _ in range(n_sims):
+        # run bracket using core model package; per-game model selection happens in _predict_game_prob_impl
+        # by swapping the model_package based on feature availability.
+        # We implement this by mutating a small wrapper dict per call.
         results = run_one_bracket(
-            matchups_64, year, model_package, barttorvik, resumes, f538, seed_results, rng, cache
+            matchups_64,
+            year,
+            {
+                "model": core_all["model"],
+                "feature_names": core_all["feature_names"],
+                "_kenpom": kenpom,
+                "_teamsheet": teamsheet,
+                "_upset_rates": upset_rates,
+                "_pick_model": pick_model,
+                "_xgb_core_all": xgb_core_all,
+                "_xgb_core_high": xgb_core_high,
+                "_strategy": strategy,
+            },
+            barttorvik,
+            resumes,
+            f538,
+            seed_results,
+            rng,
+            cache,
         )
         for team, round_reached in results:
             # "Reached at least round r": increment all r such that round_reached <= r
@@ -321,11 +447,25 @@ def run_simulation(
         row["CHAMP"] = counts[team][1] / n_sims
         rows.append(row)
     out = pd.DataFrame(rows)
-    out.to_csv(OUTPUT_DIR / f"win_probs_{year}.csv", index=False)
+    out.to_csv(OUTPUT_DIR / f"win_probs_{year}_{strategy}.csv", index=False)
     return out
 
 
 if __name__ == "__main__":
-    out = run_simulation(year=2025, n_sims=2000)
-    print("Win probabilities (2025, 2000 sims):")
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run March Madness bracket simulations.")
+    parser.add_argument("--year", type=int, default=2025, help="Tournament year to simulate.")
+    parser.add_argument("--n_sims", type=int, default=2000, help="Number of Monte Carlo simulations.")
+    parser.add_argument(
+        "--strategy",
+        type=str,
+        default="avg",
+        choices=["logistic", "xgb", "avg"],
+        help="Which model to use: pure logistic, pure XGBoost, or averaged.",
+    )
+    args = parser.parse_args()
+
+    out = run_simulation(year=args.year, n_sims=args.n_sims, strategy=args.strategy)
+    print(f"Win probabilities ({args.year}, {args.n_sims} sims, strategy={args.strategy}):")
     print(out.sort_values("CHAMP", ascending=False).head(12).to_string())
